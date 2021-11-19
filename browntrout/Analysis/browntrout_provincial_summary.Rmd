@@ -1,0 +1,526 @@
+---
+title: "Brown Trout stocking - Ontario summary (inland and Great Lakes)"
+author: "Colin Lake - MNRF<br>Glenora Fisheries Station<br>Lake Ontario Management Unit"
+date: "Updated: `r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float:
+      collapsed: false
+      smooth_scroll: true
+---
+
+<style type="text/css">
+table {
+  font-size: 9pt;
+}
+</style>
+
+<style type="text/css">
+p.caption {
+  font-size: 1.5em;
+}
+</style>
+
+<hr style="border:1px solid gray"> </hr>
+
+```{r, echo=FALSE}
+knitr::opts_chunk$set(fig.width=10, fig.height=7, echo=FALSE, message=FALSE, warning=FALSE)
+```
+
+```{r readData,include=FALSE}
+
+library(tidyr)
+library(dplyr)
+library(readxl)
+library(DT)
+library(ggsci)
+library(sp)
+library(leaflet)
+library(lubridate)
+library(plotly)
+library(scales)
+library(janitor)
+library(sjmisc)
+library(purrr)
+library(kableExtra)
+library(rgdal)
+library(wesanderson)
+library(viridis)
+library(ggplot2)
+
+load(file = "Data/Processed/brown_fsis.rda")
+
+df <- brown_fsis
+
+minyr <- min(df$STOCKING_YEAR)
+maxyr <- max(df$STOCKING_YEAR)
+totrecs <- nrow(df)
+
+df$LIFESTAGE <- factor(df$LIFESTAGE, 
+                          levels = c(
+                            "Egg",
+                            "Fry",
+                            "Spring Fingerling",
+                            "Fall Fingerling",
+                            "Spring Yearling",
+                            "Fall Yearling",
+                            "Sub-adult",
+                            "Adult"))
+
+
+minyr <- min(df$STOCKING_YEAR)
+maxyr <- max(df$STOCKING_YEAR)
+
+# Check missing values ============================
+
+# quick check for commonly missing variables
+wtchk <- aggregate(FISH_WEIGHT ~ STOCKING_YEAR, data=df, function(x) {sum(is.na(x))}, na.action = NULL)
+agechk <- aggregate(FISH_AGE ~ STOCKING_YEAR, data=df, function(x) {sum(is.na(x))}, na.action = NULL)
+#utmchk <- aggregate(STOCKING_SITE_UTM ~ STOCKING_YEAR, data=df, function(x) {sum(is.na(x))}, na.action = NULL)
+yrcnt <- dplyr::count(df, STOCKING_YEAR)
+
+library(purrr)
+dfx <- list(yrcnt, wtchk,agechk) %>% 
+  reduce(left_join, by = "STOCKING_YEAR")
+
+dfx <- dfx %>%
+  rename(
+    YEAR = STOCKING_YEAR,
+    EVENTS = n,
+    WEIGHT_NA = FISH_WEIGHT,
+    AGE_NA = FISH_AGE
+  )
+
+missing <- transform(dfx, group=cut(YEAR,  breaks=c(-Inf,1945,1960,1981,2000,Inf),
+                             labels=c(paste0(minyr,"-1945"),"1946-1960", "1961-1981", "1982-2000", paste0("2001-",maxyr))))
+
+missing <- missing%>%
+      group_by(group) %>%
+       summarise_each(funs(n(), Sum=sum(.)), EVENTS, WEIGHT_NA, AGE_NA)
+
+missing <- missing %>% 
+  dplyr::select(
+    Bin = group,
+    Events = EVENTS_Sum,
+    Weight_NA = WEIGHT_NA_Sum,
+    Age_NA = AGE_NA_Sum
+  )
+
+missing <- adorn_totals(missing, where = "row")
+
+
+```
+
+## Background
+These data are pulled from FSIS (online, downloaded Nov 2021) and GeoHub (https://geohub.lio.gov.on.ca/datasets/mnrf::historical-fish-stocking-data-1900-1999/about).  The quality of the data pre-FSIS is unknown (there are data missing - use with caution).
+
+In total,<b> `r totrecs` </b>Brown Trout stocking records were found (see the table below for breakdown by years).
+
+<br><hr style="border:1px solid gray"> </hr><br>
+
+```{r Table 1}
+
+kbl(missing, format.args = list(big.mark = ","),row.names = FALSE, caption = "Brown Trout stocking data summary, showing missing data.")%>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive", full_width = TRUE))%>%
+  add_header_above(c(" " = 2, "Missing Data Count" = 2))%>%
+  #column_spec(2:4, width_min = "8em")%>%
+  row_spec((nrow(missing)-1), extra_css = "border-bottom: 2px solid")
+
+```
+
+<br><hr style="border:1px solid gray"> </hr><br>
+
+
+## Life stage
+These tables show the age and weight ranges (min and max) of the various Brown Trout life stages for both 'old' and 'new' data sets.  n = number of stocking events of the particular life stage.  Spring Yearling is the most popular Brown Trout life stage for stocking.
+
+Note that the range of weights for most life stages suggests that there are errors/outliers - see box plots below.  Seems to be a problematic variable, regardless of year.  
+
+
+```{r LIFESTAGE}
+
+chkstg1 <- dplyr::count(df, LIFESTAGE) # <- CHECK LIFESTAGE
+
+chkstg2 <- df%>% group_by(LIFESTAGE) %>% 
+  summarise(min_age = min(FISH_AGE, na.rm = TRUE),
+            max_age = max(FISH_AGE, na.rm = TRUE),
+            min_wt = min(FISH_WEIGHT, na.rm = TRUE),
+            max_wt = max(FISH_WEIGHT, na.rm = TRUE),
+            ) 
+
+chkstg2[sapply(chkstg2, is.infinite)] <- NA
+
+chkstg <- left_join(chkstg1, chkstg2)
+
+chkstg <- chkstg[order(chkstg$LIFESTAGE),]
+
+
+kbl(chkstg, format.args = list(big.mark = ","),row.names = FALSE, caption = "Brown Trout life stage summary")%>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive", full_width = TRUE))%>%
+  row_spec(0, extra_css = "border-bottom: 1.5px solid")
+
+
+```
+
+```{r box plot1}
+
+# Plot
+pbx <- df %>%
+  ggplot( aes(x=LIFESTAGE, y=FISH_AGE, fill=LIFESTAGE)) +
+    geom_boxplot() +
+    scale_fill_viridis(discrete = TRUE, alpha=0.6) +
+    geom_jitter(color="black", size=0.4, alpha=0.9) +
+    theme(
+      legend.position="none",
+      plot.title = element_text(size=11),
+        axis.text=element_text(size = 12)
+    ) +
+    xlab("Lifestage")
+
+  pbx + ggtitle("Age boxplot (data from all years pooled)")+
+  theme(plot.title = element_text(size=14, face="bold"))
+
+```
+
+<br><br>
+
+```{r box plot2}
+
+# Plot
+pby <- df %>%
+  ggplot( aes(x=LIFESTAGE, y=FISH_WEIGHT, fill=LIFESTAGE)) +
+    geom_boxplot() +
+    scale_fill_viridis(discrete = TRUE, alpha=0.6) +
+    geom_jitter(color="black", size=0.4, alpha=0.9) +
+    #theme_gfs() +
+    theme(
+      legend.position="none",
+      plot.title = element_text(size=11),
+      axis.text=element_text(size = 12)
+    ) +
+    xlab("Lifestage")
+
+pby + ggtitle("Weight-lifestage boxplot (data from all years pooled)")+
+  theme(plot.title = element_text(size=14, face="bold"))
+
+```
+
+<br><hr style="border:1px solid gray"> </hr><br>
+
+## Number
+Note that eggs are <b>not</b> included in row totals.  <br><br>Should cross-reference these numbers with other sources to make sure the broad trends make sense (particularly 1960 - 1980: did we really stop stocking Browns?). 
+
+```{r NUMBERS}
+
+dfxnum <- data.frame(
+    group_by(df, STOCKING_YEAR, LIFESTAGE) %>% summarise(NUMBER = sum(FISH_STOCKED_COUNT)))
+
+dfnum <- spread(dfxnum,LIFESTAGE, NUMBER)
+dfnum <- dfnum[order(dfnum$STOCKING_YEAR, decreasing = TRUE),]
+dfnum <- adorn_totals(dfnum, where = "row")
+#dfnum <- dfnum %>% replace(is.na(.), 0) %>% mutate(Total = rowSums(.[3:8]))
+dfnum <- dfnum %>% mutate(Total = rowSums(.[2:9], na.rm = TRUE))
+dfnum <- dfnum %>%
+  rename(
+    YEAR = STOCKING_YEAR
+  )
+
+rownames(dfnum) <- c() # somehow I picked up row names when i used 'spread', so i drop them here
+
+options(knitr.kable.NA = '---')
+
+kbl(dfnum,format.args = list(big.mark = ",")) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive", full_width = TRUE))%>%
+  row_spec((nrow(dfnum)-1), extra_css = "border-bottom: 2px solid")%>%
+  scroll_box(width = "100%", height = "500px")
+
+```
+
+
+```{r number plot}
+
+df1 <- df
+
+df1 <- filter(df1, df1$LIFESTAGE != "Egg")
+
+df1 <- df1 %>%
+  group_by(
+    LIFESTAGE,
+    STOCKING_YEAR,
+  )
+
+df1 <- df1 %>% summarise(
+  NUMBER = sum(FISH_STOCKED_COUNT)
+)
+
+stagechk <- dplyr::count(df1, vars = LIFESTAGE) # make sure all lifestages are included when factors are ordered
+
+# df1$LIFESTAGE <- factor(df1$LIFESTAGE, levels = c("Fry", "Spring Fingerling", "Fall Fingerling", "Spring Yearling", "Sub-adult", "Adult"))
+
+pal1 <- wes_palette("Zissou1",6,type = "continuous")
+pal1 <- as.character(pal1)
+
+fig1 <- plot_ly(df1, x = ~STOCKING_YEAR, y = ~NUMBER, color = ~LIFESTAGE, type = 'bar',
+                colors = pal1,
+                hoverinfo = "text",
+                hovertext = paste(
+                  "<b>Lifestage: </b>", df1$LIFESTAGE, 
+                  "<br><b>Year: </b>", df1$STOCKING_YEAR, 
+                  "<br><b>Number: </b>", scales::comma(round(df1$NUMBER), accuracy = 1))
+                )
+
+fig1 <- fig1 %>% layout(xaxis = list(title = 'YEAR'), yaxis = list(title = 'NUMBER'), barmode = 'stack', legend = list(x = 1, y = 1, bgcolor = 'rgba(0,0,0,0)'))
+
+fig1 <- fig1 %>% layout(xaxis = list(tickfont = list(size = 15)), yaxis = list(tickfont = list(size = 15)))
+
+fig1
+
+```
+
+<br><hr style="border:1px solid gray"> </hr><br>
+
+## Mean Weight by Lifestage
+
+Only data produced at MNR facilities used.
+
+```{r average weight}
+
+# FISH WEIGHT
+#  https://plotly.com/r/custom-buttons/#update-button use update buttons for MNRF vs CHP vs TOTAL
+
+dfmnr <- subset(df, df$PROPONENT_TYPE_CODE == "MNR")
+
+fishweight <- tbl_df(dfmnr) %>%
+  group_by(STOCKING_YEAR, LIFESTAGE) %>%
+  summarise(N = length(STOCKING_YEAR), 
+            min = min(FISH_WEIGHT, na.rm = TRUE),
+            avg = round(mean(FISH_WEIGHT, na.rm=T),2),
+            max = max(FISH_WEIGHT, na.rm = TRUE),
+            sd = round(sd(FISH_WEIGHT, na.rm=T),2), se = round(sd/sqrt(N),2)) 
+
+fig2 <- plot_ly(data = fishweight[which(fishweight$LIFESTAGE == 'Spring Yearling'),], x = ~STOCKING_YEAR, y = ~avg, type = 'scatter', mode = 'markers',
+               name = 'Spring Yearling',
+               marker = list(size = 11),
+               error_y = ~list(array = sd,
+                               color = '#000000',
+                               width = 8,
+                               thickness = 1))
+
+fig2 <- fig2 %>% add_trace(data = fishweight[which(fishweight$LIFESTAGE == 'Fall Fingerling'),], visible = "legendonly",name = 'Fall Fingerling')
+fig2 <- fig2 %>% add_trace(data = fishweight[which(fishweight$LIFESTAGE == 'Spring Fingerling'),], visible = "legendonly",name = 'Spring Fingerling')
+fig2 <- fig2 %>% add_trace(data = fishweight[which(fishweight$LIFESTAGE == 'Fall Yearling'),], visible = "legendonly", name = 'Fall Yearling')
+fig2 <- fig2 %>% add_trace(data = fishweight[which(fishweight$LIFESTAGE == 'Sub-adult'),], visible = "legendonly", name = 'Sub-adult')
+fig2 <- fig2 %>% add_trace(data = fishweight[which(fishweight$LIFESTAGE == 'Adult'),], visible = "legendonly", name = 'Adult')
+
+fig2 <- fig2 %>% layout(xaxis = list(title = 'YEAR'), yaxis = list(title = 'MEAN WT. (g)'))
+                        
+fig2 <- fig2 %>% layout(xaxis = list(tickfont = list(size = 15)), yaxis = list(tickfont = list(size = 15)))
+
+fig2
+
+
+```
+
+<br><hr style="border:1px solid gray"> </hr><br>
+
+## Biomass
+Note: biomass is given in kg.    
+
+```{r biomass}
+
+dfwt <- df %>%
+  select(
+    LIFESTAGE,
+    STOCKING_YEAR,
+    BIOMASS_KG
+    )
+  
+dfwt <- na.omit(dfwt)
+
+dfwt <- dfwt %>%
+  group_by(
+    LIFESTAGE,
+    STOCKING_YEAR) %>% 
+  summarise(BIOMASS = round(sum(BIOMASS_KG),digits=0)
+)
+
+dfwtsp <- spread(dfwt,LIFESTAGE, BIOMASS)
+dfwtsp <- dfwtsp[order(dfwtsp$STOCKING_YEAR, decreasing = TRUE),]
+dfwtsp <- adorn_totals(dfwtsp, where = "row")
+dfwtsp <- dfwtsp %>% mutate(Total = rowSums(.[2:9], na.rm = TRUE))
+dfwtsp$Total <- round(dfwtsp$Total,digits = 0)
+dfwtsp <- dfwtsp %>%
+  rename(
+    YEAR = STOCKING_YEAR
+  )
+
+options(knitr.kable.NA = '--')
+kbl(dfwtsp,format.args = list(big.mark = ","))%>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive", full_width = TRUE))%>%
+  row_spec((nrow(dfwtsp)-1), extra_css = "border-bottom: 1.5px solid") %>%
+  scroll_box(width = "100%", height = "500px")
+
+```
+
+```{r biomass plot}
+
+fig3 <- plot_ly(dfwt, x = ~STOCKING_YEAR, y = ~BIOMASS, color = ~LIFESTAGE, type = 'bar',
+                colors = pal1,
+                hoverinfo = "text",
+                hovertext = paste(
+                  "<b>Lifestage: </b>", dfwt$LIFESTAGE, 
+                  "<br><b>Year: </b>", dfwt$STOCKING_YEAR, 
+                  "<br><b>Biomass: </b>", dfwt$BIOMASS))
+
+fig3 <- fig3 %>% layout(xaxis = list(title = 'YEAR'), yaxis = list(title = 'BIOMASS (kg)'),barmode = 'stack')
+#fig3 <- fig3 %>% layout(legend = list(x = 0.05, y = 1, bgcolor = 'rgba(0,0,0,0)'))
+
+fig3 <- fig3 %>% layout(xaxis = list(tickfont = list(size = 15)), yaxis = list(tickfont = list(size = 15)))
+
+
+fig3
+
+```
+
+
+<br><hr style="border:1px solid gray"> </hr><br>
+
+## Map
+
+Click on the point to see a summary of how many fish have been stocked at that site, number of stocking events, and the span of years (min and max) over which stocking has been done at this location.
+
+```{r MAP}
+
+# make new data frame to be used for map
+
+df2 <- df %>% 
+  group_by(STOCKED_WATERBODY_NAME, STOCKING_SITE_NAME, STOCKING_SITE_ID) %>%
+  summarize(
+    number = sum(FISH_STOCKED_COUNT),
+    biomass = sum(BIOMASS_KG),
+    yearmin = min(STOCKING_YEAR),
+    yearmax = max(STOCKING_YEAR),
+    events = mean(n),
+    LATITUDE = round(mean(LATITUDE), digits = 4),
+    LONGITUDE = round(mean(LONGITUDE), digits = 4)
+    )
+
+fmz <- readOGR(dsn = "Data/Spatial",layer = "FMZ", verbose = FALSE)
+
+coordinates(df2) <- c("LONGITUDE","LATITUDE")
+
+proj4string(df2) <- proj4string(fmz)
+df2$FMZ <- over(df2,fmz)$Name # spatial join; assigns FMZ label to data frame based on overlap with shapefile
+
+df3 <- as.data.frame(df2) # turns spatial data frame into normal data frame; use this going forward in leaflet
+
+# some of the stocking sites on the margins of FMZ 20 should be considered part of FMZ 20:
+
+zone20 <- read.csv("Data/Lookup/fmzcorrection.csv", stringsAsFactors = FALSE)
+
+df3 <- left_join(df3, zone20, by = "STOCKING_SITE_ID")
+
+df3$FMZ <- with(df3, ifelse(is.na(FMZ.y), FMZ.x, FMZ.y))
+
+df3 <- df3 %>% select(-c(FMZ.x, FMZ.y))
+
+
+# MAP -------------------------------------------------------------------
+
+palette <- colorFactor(palette = rainbow(length(unique(df3$FMZ))), domain = df3$FMZ)
+
+mymap <-  leaflet(df3) %>% 
+  addProviderTiles(providers$CartoDB.Positron) %>%
+  addPolygons(data = fmz, color="black", weight = 1, group = 'FMZ')
+
+mymap <- mymap %>% addCircleMarkers(data = df3, 
+                                    popup = paste("<b>FMZ: </b>", df3$FMZ,
+                                                  "<br><b>Waterbody: </b>", df3$STOCKED_WATERBODY_NAME,
+                                                  "<br><b>Site Name: </b>", df3$STOCKING_SITE_NAME,
+                                                  "<br><b>Site ID: </b>", df3$STOCKING_SITE_ID,
+                                                  "<br><b>LAT: </b>", df3$LATITUDE,
+                                                  "<br><b>LON: </b>", df3$LONGITUDE,
+                                                  "<br><b>Total #: </b>", df3$number,
+                                                  "<br><b>Biomass_kg: </b>", df3$biomass,
+                                                  "<br><b>First Year: </b>", df3$yearmin,
+                                                  "<br><b>Last Year: </b>", df3$yearmax,
+                                                  "<br><b>Stocking Events: </b>", df3$events),
+                                    fillOpacity = 0.6, radius = 4, fillColor = ~palette(FMZ),
+                                    color = "black", weight = 1, opacity = 0.5)
+
+mymap %>%
+  addLegend(pal = palette, values = ~FMZ, title = "FMZ")
+
+
+```
+
+
+<br><hr style="border:1px solid gray"> </hr><br>
+
+
+## Trend by FMZ
+
+Note that stocking records without spatial data could not be assigned to an FMZ, so data from those stocking events are not included in these plots.
+
+```{r stocking data by FMZ}
+
+
+df4 <- df3 %>% dplyr::select(1:3, 9:11) # small df used to join FMZ to original data set
+
+df4 <- left_join(df, df4, by = "STOCKING_SITE_ID")
+
+# group data
+df5 <- df4 %>%
+  group_by(
+    STOCKING_YEAR,
+    FMZ
+    ) %>%
+  summarize(
+    number = sum(FISH_STOCKED_COUNT),
+    avg_weight_g = mean(FISH_WEIGHT),
+    biomass_kg = sum(BIOMASS_KG)
+    )
+
+#https://stackoverflow.com/questions/38931194/warning-when-defining-factor-duplicated-levels-in-factors-are-deprecated
+
+#df5$FMZ = factor(df5$FMZ, levels = rev(unique(gtools::mixedsort(df5$FMZ))))
+
+p <- ggplot(df5, aes(STOCKING_YEAR, number/1000)) + geom_line() + theme_bw() +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  #theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  xlab("Stocking Year") + ylab("Number (1000s)")+
+  ggtitle("Number of Brown Trout stocked by year and FMZ")
+p + facet_wrap(~FMZ)
+
+
+```
+
+<br><hr style="border:1px solid gray"> </hr><br>
+
+
+
+## Biomass Summary by FMZ
+
+Weight data missing for some years - use these data with caution
+
+```{r fmz biomass plot}
+
+fig4 <- plot_ly(df5, x = ~STOCKING_YEAR, y = ~biomass_kg, color = ~FMZ, type = 'bar',
+                colors = pal1,
+                hoverinfo = "text",
+                hovertext = paste(
+                  "<b>FMZ: </b>", df5$FMZ, 
+                  "<br><b>Year: </b>", df5$STOCKING_YEAR, 
+                  "<br><b>Biomass: </b>", df5$biomass_kg))
+
+fig4 <- fig4 %>% layout(xaxis = list(title = 'YEAR'), yaxis = list(title = 'BIOMASS (kg)'),barmode = 'stack')
+#fig3 <- fig3 %>% layout(legend = list(x = 0.05, y = 1, bgcolor = 'rgba(0,0,0,0)'))
+
+fig4 <- fig4 %>% layout(xaxis = list(tickfont = list(size = 15)), yaxis = list(tickfont = list(size = 15)))
+
+
+fig4
+
+```
+
